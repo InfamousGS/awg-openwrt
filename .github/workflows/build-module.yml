@@ -22,6 +22,10 @@ on:
         default: 'filogic'
         type: string
 
+env:
+  # Força o uso do Node 24 para evitar avisos de obsolescência
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   generate-config:
     runs-on: ubuntu-latest
@@ -34,7 +38,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20.16.0'
+          node-version: '24' # ATUALIZADO PARA NODE 24
 
       - name: Get Version
         run: |
@@ -77,9 +81,7 @@ jobs:
 
       - name: Download and extract ImmortalWrt SDK
         run: |
-          # AQUI ESTÁ O PULO DO GATO: MUDAMOS PARA O DOMÍNIO DA IMMORTALWRT
           BASE_URL="https://downloads.immortalwrt.org/releases/${{ matrix.build_env.tag }}/targets/${{ matrix.build_env.target}}/${{ matrix.build_env.subtarget}}/"
-          
           SDK_FILE=$(curl -s "$BASE_URL" | grep -o "immortalwrt-sdk-${{ matrix.build_env.tag }}-${{ matrix.build_env.target}}-${{ matrix.build_env.subtarget}}_gcc-[^\"]*_musl[^\"]*\.Linux-x86_64\.tar\.[xz|zst]*" | head -n1)
           
           if [ -z "$SDK_FILE" ]; then
@@ -94,10 +96,8 @@ jobs:
 
       - name: Setup SDK and feeds
         run: |
-          # Procura a pasta do SDK (que agora começa com immortalwrt-sdk)
           SDK_DIR=$(find . -maxdepth 1 -name "*sdk-*" -type d | head -n1)
           cd "$SDK_DIR"
-          
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           
@@ -122,7 +122,11 @@ jobs:
         run: |
           SDK_DIR=$(find . -maxdepth 1 -name "*sdk-*" -type d | head -n1)
           mkdir -p awgrelease
-          find "$SDK_DIR/bin/" -name "*.ipk" -exec cp {} awgrelease/ \;
+          
+          # FILTRO CRÍTICO: Pega apenas o que tem "amneziawg" no nome
+          find "$SDK_DIR/bin/" -name "*amneziawg*.ipk" -exec cp {} awgrelease/ \;
+          
+          echo "Arquivos filtrados para o Release:"
           ls -la awgrelease/
 
       - name: Release
@@ -130,3 +134,4 @@ jobs:
         with:
           files: awgrelease/*.ipk
           tag_name: v${{ matrix.build_env.tag }}-immortal
+          generate_release_notes: true
