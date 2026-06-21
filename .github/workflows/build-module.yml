@@ -2,18 +2,21 @@ name: Create Release on Tag (ImmortalWrt Version)
 
 on:
   push:
-    tags: ["v*.*.*"]
+    tags: 
+      - "v*.*.*"
   workflow_dispatch:
     inputs:
       version:
-        description: 'Versão do ImmortalWrt'
+        description: 'Versão do ImmortalWrt (ex: 24.10.6)'
         required: true
         default: '24.10.6'
       targets:
-        description: 'Targets'
+        description: 'Target do hardware'
+        required: true
         default: 'mediatek'
       subtargets:
-        description: 'Subtargets'
+        description: 'Subtarget do hardware'
+        required: true
         default: 'filogic'
 
 permissions:
@@ -23,61 +26,113 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout seu código fonte
+        uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Instalar Dependências do Sistema
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-pyelftools build-essential clang flex bison gawk gettext git ccache texinfo libssl-dev xz-utils ncurses-dev
 
-      - name: Build
+      - name: Definir Variáveis de Ambiente
         run: |
-          # Define a versão do SDK
-          VERSION="${{ inputs.version }}"
-          TARGET="${{ inputs.targets }}"
-          SUBTARGET="${{ inputs.subtargets }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ inputs.version }}" >> $GITHUB_ENV
+            echo "TARGET=${{ inputs.targets }}" >> $GITHUB_ENV
+            echo "SUBTARGET=${{ inputs.subtargets }}" >> $GITHUB_ENV
+          else
+            # Se for gatilho por TAG (ex: v24.10.6), removemos o 'v' para a URL do SDK
+            CLEAN_VERSION=$(echo "${{ github.ref_name }}" | sed 's/^v//')
+            echo "VERSION=${CLEAN_VERSION}" >> $GITHUB_ENV
+            # Defina os padrões para builds automáticos via TAG aqui:
+            echo "TARGET=mediatek" >> $GITHUB_ENV
+            echo "SUBTARGET=filogic" >> $GITHUB_ENV
+          fi
+
+      - name: Baixar e Extrair o SDK do ImmortalWrt
+        run: |
+          BASE_URL="https://downloads.immortalwrt.org/releases/${{ env.VERSION }}/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/"
+          echo "Buscando SDK em: $BASE_URL"
           
-          # Baixa e extrai
-          BASE_URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/${TARGET}/${SUBTARGET}/"
-          SDK_FILE=$(curl -s "$BASE_URL" | grep -o "immortalwrt-sdk-${VERSION}-${TARGET}-${SUBTARGET}_gcc-[^\"]*_musl[^\"]*\.Linux-x86_64\.tar\.[xz|zst]*" | head -n1)
-          wget "${BASE_URL}${SDK_FILE}"
+          # Captura o nome exato do arquivo do SDK dinamicamente
+          SDK_FILE=$(curl -sL "$BASE_URL" | grep -oE "immortalwrt-sdk-[0-9\.]+-${{ env.TARGET }}-${{ env.SUBTARGET }}_gcc-[^\"]*_musl[^\"]*\.Linux-x86_64\.tar\.(xz|zst)" | head -n1)
+          
+          if [ -z "$SDK_FILE" ]; then
+            echo "Erro: Arquivo do SDK não encontrado na URL informada."
+            exit 1
+          fi
+          
+          echo "Baixando o SDK: ${BASE_URL}${SDK_FILE}"
+          wget -q "${BASE_URL}${SDK_FILE}"
+          
+          echo "Extraindo o SDK..."
           tar -xf "$SDK_FILE"
+          rm "$SDK_FILE"
+          
+          # Localiza a pasta extraída e salva o caminho globalmente
           SDK_DIR=$(find . -maxdepth 1 -name "*sdk-*" -type d | head -n1)
+          echo "SDK_DIR=${SDK_DIR}" >> $GITHUB_ENV
+
+      - name: Configurar Feeds e Injetar Pacotes do AmneziaWG
+        run: |
+          WORKSPACE_DIR=$(pwd)
+          cd "${{ env.SDK_DIR }}"
           
-          cd "$SDK_DIR"
-          
-          # Prepara feeds
+          # Atualiza a árvore de pacotes nativos do ImmortalWrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           
-          # Copia seus pacotes
-          cp -r ../kmod-amneziawg package/
-          cp -r ../amneziawg-tools package/
-          cp -r ../luci-proto-amneziawg package/
+          # Copia os seus pacotes locais do repositório para dentro do ecossistema do SDK
+          cp -r "$WORKSPACE_DIR/kmod-amneziawg" package/
+          cp -r "$WORKSPACE_DIR/amneziawg-tools" package/
+          cp -r "$WORKSPACE_DIR/luci-proto-amneziawg" package/
           
-          # CRUCIAL: Configuração silenciosa sem menuconfig
-          # Cria um arquivo .config básico para evitar erro de terminal
-          echo "CONFIG_PACKAGE_kmod-amneziawg=m" >> .config
+          # Força a marcação de compilação apenas para o que nos interessa
+          echo "CONFIG_PACKAGE_kmod-amneziawg=m" > .config
           echo "CONFIG_PACKAGE_amneziawg-tools=y" >> .config
           echo "CONFIG_PACKAGE_luci-proto-amneziawg=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-amneziawg-ru=y" >> .config
           
-          # Resolve dependências faltando
+          # Aplica as configurações de dependência de forma silenciosa
           make defconfig
-          
-          # Compila sem interatividade
-          make package/kmod-amneziawg/compile
-          make package/amneziawg-tools/compile
-          make package/luci-proto-amneziawg/compile
 
-      - name: Release
+      - name: Compilar os módulos AmneziaWG
+        run: |
+          cd "${{ env.SDK_DIR }}"
+          
+          echo "Compilando kmod-amneziawg..."
+          make package/kmod-amneziawg/download V=s || true
+          make package/kmod-amneziawg/prepare V=s || true
+          make package/kmod-amneziawg/compile -j$(nproc) V=s
+          
+          echo "Compilando amneziawg-tools..."
+          make package/amneziawg-tools/compile -j$(nproc) V=s
+          
+          echo "Compilando luci-proto-amneziawg..."
+          make package/luci-proto-amneziawg/compile -j$(nproc) V=s
+
+      - name: Coletar apenas os artefatos do AmneziaWG
         run: |
           mkdir -p awgrelease
-          find . -name "*.ipk" -exec cp {} awgrelease/ \;
+          
+          echo "Filtrando e isolando os arquivos gerados..."
+          # Alvo cirúrgico: copia APENAS arquivos que possuem amneziawg no nome
+          find "${{ env.SDK_DIR }}/bin/" -type f -name "*amneziawg*.ipk" -exec cp {} awgrelease/ \;
+          
+          echo "Conteúdo final da pasta de Release:"
           ls -la awgrelease/
           
-        # Usamos o upload direto para evitar problemas com tokens de release
-      - uses: softprops/action-gh-release@v2
+          # Validação de segurança: se a pasta estiver vazia, o build falhou silenciosamente antes
+          if [ -z "$(ls -A awgrelease)" ]; then
+            echo "Erro Crítico: Nenhum pacote .ipk do AmneziaWG foi gerado!"
+            exit 1
+          fi
+
+      - name: Publicar no GitHub Releases
+        uses: softprops/action-gh-release@v2
         with:
           files: awgrelease/*.ipk
-          tag_name: v${{ inputs.version }}
+          tag_name: v${{ env.VERSION }}
           generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
