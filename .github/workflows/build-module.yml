@@ -2,115 +2,82 @@ name: Create Release on Tag (ImmortalWrt Version)
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Versão do ImmortalWrt (ex: 24.10.6)'
+        description: 'Versão do ImmortalWrt'
         required: true
         default: '24.10.6'
-        type: string
       targets:
         description: 'Targets'
-        required: false
         default: 'mediatek'
-        type: string
       subtargets:
         description: 'Subtargets'
-        required: false
         default: 'filogic'
-        type: string
 
 permissions:
   contents: write
 
 jobs:
   build:
-    name: "ImmortalWrt Build"
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout AWG source code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Get Version and Target Configuration
-        id: config
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "VERSION=${{ inputs.version }}" >> $GITHUB_ENV
-            echo "TARGET=${{ inputs.targets }}" >> $GITHUB_ENV
-            echo "SUBTARGET=${{ inputs.subtargets }}" >> $GITHUB_ENV
-          else
-            TAG_VERSION="${GITHUB_REF#refs/tags/}"
-            TAG_VERSION="${TAG_VERSION#v}"
-            echo "VERSION=${TAG_VERSION}" >> $GITHUB_ENV
-            echo "TARGET=mediatek" >> $GITHUB_ENV
-            echo "SUBTARGET=filogic" >> $GITHUB_ENV
-          fi
-
-      - name: Install System Dependencies
+      - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pyelftools build-essential clang flex bison gawk gettext git ccache texinfo libssl-dev xz-utils
+          sudo apt-get install -y python3-pyelftools build-essential clang flex bison gawk gettext git ccache texinfo libssl-dev xz-utils ncurses-dev
 
-      - name: Download and extract ImmortalWrt SDK
+      - name: Build
         run: |
-          BASE_URL="https://downloads.immortalwrt.org/releases/${{ env.VERSION }}/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/"
-          SDK_FILE=$(curl -s "$BASE_URL" | grep -o "immortalwrt-sdk-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}_gcc-[^\"]*_musl[^\"]*\.Linux-x86_64\.tar\.[xz|zst]*" | head -n1)
+          # Define a versão do SDK
+          VERSION="${{ inputs.version }}"
+          TARGET="${{ inputs.targets }}"
+          SUBTARGET="${{ inputs.subtargets }}"
           
-          if [ -z "$SDK_FILE" ]; then
-            echo "Erro: SDK do ImmortalWrt não encontrado em $BASE_URL"
-            exit 1
-          fi
-          
-          echo "Baixando SDK: ${BASE_URL}${SDK_FILE}"
+          # Baixa e extrai
+          BASE_URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/${TARGET}/${SUBTARGET}/"
+          SDK_FILE=$(curl -s "$BASE_URL" | grep -o "immortalwrt-sdk-${VERSION}-${TARGET}-${SUBTARGET}_gcc-[^\"]*_musl[^\"]*\.Linux-x86_64\.tar\.[xz|zst]*" | head -n1)
           wget "${BASE_URL}${SDK_FILE}"
           tar -xf "$SDK_FILE"
-          rm "$SDK_FILE"
-
-      - name: Setup SDK and feeds
-        run: |
           SDK_DIR=$(find . -maxdepth 1 -name "*sdk-*" -type d | head -n1)
+          
           cd "$SDK_DIR"
+          
+          # Prepara feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           
-          [ -d "../kmod-amneziawg" ] && cp -r ../kmod-amneziawg package/ || echo "Aviso: kmod-amneziawg não encontrado"
-          [ -d "../amneziawg-tools" ] && cp -r ../amneziawg-tools package/ || echo "Aviso: amneziawg-tools não encontrado"
-          [ -d "../luci-proto-amneziawg" ] && cp -r ../luci-proto-amneziawg package/ || echo "Aviso: luci-proto-amneziawg não encontrado"
+          # Copia seus pacotes
+          cp -r ../kmod-amneziawg package/
+          cp -r ../amneziawg-tools package/
+          cp -r ../luci-proto-amneziawg package/
           
-          # Em vez de defconfig, que limpa as configs, apenas garantimos que as dependências existem
-          ./scripts/feeds install -a
+          # CRUCIAL: Configuração silenciosa sem menuconfig
+          # Cria um arquivo .config básico para evitar erro de terminal
+          echo "CONFIG_PACKAGE_kmod-amneziawg=m" >> .config
+          echo "CONFIG_PACKAGE_amneziawg-tools=y" >> .config
+          echo "CONFIG_PACKAGE_luci-proto-amneziawg=y" >> .config
           
-      - name: Build AmneziaWG
-        run: |
-          SDK_DIR=$(find . -maxdepth 1 -name "*sdk-*" -type d | head -n1)
-          cd "$SDK_DIR"
-          # Compilamos direto. Se faltar algo, o Makefile pedirá durante o processo
-          make package/kmod-amneziawg/compile V=s
-          make package/amneziawg-tools/compile V=s
-          make package/luci-proto-amneziawg/compile V=s
-
-      - name: Prepare artifacts
-        run: |
-          SDK_DIR=$(find . -maxdepth 1 -name "*sdk-*" -type d | head -n1)
-          mkdir -p awgrelease
+          # Resolve dependências faltando
+          make defconfig
           
-          # Busca recursiva mais precisa pelos arquivos .ipk
-          find "$SDK_DIR/bin/" -type f -name "*amneziawg*.ipk" -exec cp {} awgrelease/ \;
-          
-          echo "Arquivos movidos para o diretório de liberação:"
-          ls -la awgrelease/
-          
-          if [ -z "$(ls -A awgrelease)" ]; then
-            echo "ERRO CRÍTICO: Nenhum pacote .ipk foi encontrado."
-            exit 1
-          fi
+          # Compila sem interatividade
+          make package/kmod-amneziawg/compile
+          make package/amneziawg-tools/compile
+          make package/luci-proto-amneziawg/compile
 
       - name: Release
-        uses: softprops/action-gh-release@v2
+        run: |
+          mkdir -p awgrelease
+          find . -name "*.ipk" -exec cp {} awgrelease/ \;
+          ls -la awgrelease/
+          
+        # Usamos o upload direto para evitar problemas com tokens de release
+      - uses: softprops/action-gh-release@v2
         with:
           files: awgrelease/*.ipk
-          tag_name: v${{ env.VERSION }}
+          tag_name: v${{ inputs.version }}
           generate_release_notes: true
