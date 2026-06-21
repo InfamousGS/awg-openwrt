@@ -22,7 +22,6 @@ on:
         default: 'filogic'
         type: string
 
-# CORREÇÃO DO ERRO 403: Força permissão de escrita no token do repositório
 permissions:
   contents: write
 
@@ -53,7 +52,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pyelftools build-essential clang flex bison gawk gettext git ccache textinfo libssl-dev xz-utils
+          sudo apt-get install -y python3-pyelftools build-essential clang flex bison gawk gettext git ccache texinfo libssl-dev xz-utils
 
       - name: Download and extract ImmortalWrt SDK
         run: |
@@ -77,20 +76,18 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           
-          # Copia os diretórios se eles existirem na raiz do repositório
           [ -d "../kmod-amneziawg" ] && cp -r ../kmod-amneziawg package/ || echo "Aviso: kmod-amneziawg não encontrado"
           [ -d "../amneziawg-tools" ] && cp -r ../amneziawg-tools package/ || echo "Aviso: amneziawg-tools não encontrado"
           [ -d "../luci-proto-amneziawg" ] && cp -r ../luci-proto-amneziawg package/ || echo "Aviso: luci-proto-amneziawg não encontrado"
           
-          echo "CONFIG_PACKAGE_kmod-amneziawg=m" > .config
-          echo "CONFIG_PACKAGE_amneziawg-tools=y" >> .config
-          echo "CONFIG_PACKAGE_luci-proto-amneziawg=y" >> .config
-          make defconfig
-
+          # Em vez de defconfig, que limpa as configs, apenas garantimos que as dependências existem
+          ./scripts/feeds install -a
+          
       - name: Build AmneziaWG
         run: |
           SDK_DIR=$(find . -maxdepth 1 -name "*sdk-*" -type d | head -n1)
           cd "$SDK_DIR"
+          # Compilamos direto. Se faltar algo, o Makefile pedirá durante o processo
           make package/kmod-amneziawg/compile V=s
           make package/amneziawg-tools/compile V=s
           make package/luci-proto-amneziawg/compile V=s
@@ -100,15 +97,14 @@ jobs:
           SDK_DIR=$(find . -maxdepth 1 -name "*sdk-*" -type d | head -n1)
           mkdir -p awgrelease
           
-          # Busca expandida para garantir a captura de todos os pacotes IPK gerados
-          find "$SDK_DIR/bin/" -name "*.ipk" -exec cp {} awgrelease/ \;
+          # Busca recursiva mais precisa pelos arquivos .ipk
+          find "$SDK_DIR/bin/" -type f -name "*amneziawg*.ipk" -exec cp {} awgrelease/ \;
           
           echo "Arquivos movidos para o diretório de liberação:"
           ls -la awgrelease/
           
-          # Validação: Força o workflow a parar aqui com erro se a compilação falhou
           if [ -z "$(ls -A awgrelease)" ]; then
-            echo "ERRO CRÍTICO: Nenhum pacote .ipk foi encontrado em bin/."
+            echo "ERRO CRÍTICO: Nenhum pacote .ipk foi encontrado."
             exit 1
           fi
 
@@ -116,5 +112,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: awgrelease/*.ipk
-          tag_name: v${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}
+          tag_name: v${{ env.VERSION }}
           generate_release_notes: true
